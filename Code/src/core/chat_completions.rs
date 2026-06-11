@@ -499,6 +499,82 @@ fn parse_sse_event(event: &Value) -> Option<ResponseEvent> {
             .unwrap_or("unknown")
     );
 
+    // ChatGPT's Responses API emits function-call arguments as raw `delta`
+    // strings. Do not surface those as assistant text; emit the completed tool
+    // call from `response.output_item.done` instead.
+    let event_type = event.get("type").and_then(|v| v.as_str());
+    if matches!(
+        event_type,
+        Some("response.function_call_arguments.delta")
+            | Some("response.function_call_arguments.done")
+    ) {
+        return None;
+    }
+
+    if event_type == Some("response.output_item.done") {
+        if let Some(item) = event.get("item") {
+            if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
+                let output_index = event
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("id").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()));
+
+                return Some(ResponseEvent {
+                    id: event
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| {
+                            format!("chatcmpl-{}", &uuid::Uuid::new_v4().to_string()[..8])
+                        }),
+                    object: "chat.completion.chunk".to_string(),
+                    created: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                    model: event
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("gpt-5")
+                        .to_string(),
+                    choices: vec![ResponseChoice {
+                        index: 0,
+                        delta: ResponseDelta {
+                            role: Some("assistant".to_string()),
+                            content: None,
+                            tool_calls: Some(serde_json::json!([{
+                                "id": call_id,
+                                "type": "function",
+                                "index": output_index,
+                                "function": {
+                                    "name": name,
+                                    "arguments": arguments
+                                }
+                            }])),
+                        },
+                        finish_reason: Some("tool_calls".to_string()),
+                    }],
+                });
+            }
+        }
+    }
+
     // ChatGPT's Responses API has a different structure than OpenAI's
     // It might have fields like: response, message, content, etc.
 
