@@ -1,123 +1,91 @@
 # Codex Proxy Server
 
-## Overview
-
-The Codex Proxy Server is a secure, modular, and ergonomic proxy server built in Rust using the [Axum](https://github.com/tokio-rs/axum) framework. It provides a local API proxy for Codex/ChatGPT-like models, with robust authentication, logging, and server management features. It is designed to integrate seamlessly with Opencode and other compatible tools.
-
-**Note:** Codex Proxy Server uses code from the OpenAI Codex CLI and leverages OpenAI's authentication flow to access models and determine plan eligibility. This ensures compatibility with OpenAI's model access and plan system.
+Local OpenAI-compatible proxy for ChatGPT/Codex-backed `gpt-5*` models. It exposes Chat Completions and Responses-style endpoints on `127.0.0.1:5011`, uses local Codex/OpenCode authentication, and can pass other `/v1/*` OpenAI API calls through when an OpenAI API key is available.
 
 ## Features
-- Secure authentication using local `auth.json` tokens
-- CLI menu for server management (start, stop, list servers, login, refresh token)
-- Health check and model listing endpoints
-- Safe Rust (no unsafe code)
-- Structured logging to `./logs/codex-proxy.log`
-- Cross-platform server management (Unix/macOS/Windows)
-- No hardcoded secrets, usernames, or tokens in source code
+
+- `POST /v1/chat/completions` and legacy `POST /chat/completions`
+- `POST /v1/responses` and `POST /responses`
+- Local `store=true` support for Responses API requests
+- `previous_response_id` replay from the local response store
+- `GET` and `DELETE` for stored responses
+- `GET /v1/models` and `GET /health`
+- Wildcard `/v1/*` passthrough to `https://api.openai.com/v1/*`
+- Redacted YAML request/response logs
+- Size-based log pruning and response-store retention
 
 ## Requirements
-- Rust (latest stable recommended)
-- Cargo (comes with Rust)
 
-## Quick Start
+- Rust stable
+- A valid `auth.json` from Codex/OpenCode login, or an OpenAI API key for passthrough-only endpoints
 
-### 1. Download/Clone the Repository
+## Build And Run
+
 ```sh
-git clone https://github.com/unluckyjori/Codex-Proxy-Server.git
-cd "Code"
-```
-
-### 2. Build the Project (Required Once)
-```sh
+cd Code
 cargo build --release
+cargo run --release -- --server
 ```
 
-### 3. Run the Server
-```sh
-cargo run --release
-```
-
-### 4. Use the CLI Menu
-- **Run server**: Starts the proxy server on port 5011
-- **Close all servers**: Terminates all running proxy servers on ports 5011–5020
-- **Login**: Authenticates and stores your token in `~/.codex/auth.json`
-- **Refresh token**: Refreshes your authentication token
-- **List running servers**: Shows which ports are active
-- **Exit**: Quits the CLI
+With no arguments, the binary opens an interactive menu for starting the server, login, token refresh, listing ports, and closing running servers.
 
 ## Authentication
 
-Authentication and model access are handled using the same mechanisms as the OpenAI Codex CLI. Your plan type and model access are determined by your OpenAI account and authentication tokens. The server supports three locations for your authentication token (`auth.json`). It will search and create the token in the following order:
+The server searches for ChatGPT/Codex auth in this order:
 
-1. **`~/.codex/auth.json`** — Primary location (Codex CLI compatible)
-2. **`~/.opencode/auth.json`** — Secondary location (Opencode integration default)
-3. **`./local_auth/auth.json`** — Fallback location in the current working directory
+1. `./local_auth/auth.json`
+2. `./auth.json`
+3. `~/.codex/auth.json`
+4. `~/.opencode/auth.json`
 
-**How it works:**
-- On first run, the server checks for `auth.json` in `~/.codex/`.
-- If not found or not writable, it tries `~/.opencode/`.
-- If both fail, it creates `auth.json` in a local folder called `local_auth` in your current directory.
-- The CLI will notify you where your token is stored. If using the fallback, you will see a warning and should move the file to `~/.codex/` or `~/.opencode/` for best compatibility.
-- The server will not start without valid authentication in one of these locations.
+Use the interactive `Login` option if you need to create an auth file. Passthrough OpenAI endpoints also accept an incoming `Authorization` header or `OPENAI_API_KEY`.
 
-## Important: OpenAI/Opencode Auth Reset
+## Endpoints
 
-If you have previously logged in to Opencode using OpenAI authentication, you must: (This is required for Opencode integration with Codex Proxy Server)
+- `POST /v1/chat/completions`: OpenAI Chat Completions-compatible local endpoint
+- `POST /chat/completions`: legacy Chat Completions-compatible local endpoint
+- `POST /v1/responses`: Responses API-compatible local endpoint
+- `POST /responses`: legacy Responses API-compatible local endpoint
+- `GET /v1/responses/{id}` and `GET /responses/{id}`: retrieve a locally stored response
+- `DELETE /v1/responses/{id}` and `DELETE /responses/{id}`: delete a locally stored response
+- `GET /v1/models`: list supported local model ids
+- `/v1/*`: passthrough to OpenAI API for endpoints documented in `Docs/openapi.with-code-samples.yml`
+- `GET /health`: health check
 
-1. Run the following command to log out of Opencode:
-   ```sh
-   opencode auth logout
-   ```
-2. Select OpenAI.
-3. After logging out, add the following provider configuration to your Opencode settings (in your `opencode.json` config):
+## Responses Store
 
-```json
-  "openai": {
-    "npm": "@ai-sdk/openai-compatible",
-    "name": "openai",
-    "options": {
-      "baseURL": "http://127.0.0.1:5011",
-      "apiKey": "auto"
-    },
-    "models": {
-      "gpt-5": {
-        "name": "gpt-5"
-      },
-      "gpt-5-mini": {
-        "name": "gpt-5-mini"
-      },
-      "gpt-5-nano": {
-        "name": "gpt-5-nano"
-      }
-    }
-  },
+The ChatGPT/Codex backend rejects upstream `store=true`, so this proxy forces upstream `store=false` and stores completed responses locally when the client requests `store=true`.
+
+Stored responses are used to expand `previous_response_id` into full local conversation history before sending the next upstream request.
+
+## Configuration
+
+Environment variables:
+
+- `CODEX_PROXY_REQUEST_LOG_DIR`: request/response YAML log directory, default `~/.codex-proxy/logs`
+- `CODEX_PROXY_STORE_DIR`: local response store directory, default `~/.codex-proxy/store`
+- `CODEX_PROXY_STORE_MAX_AGE_DAYS`: response retention, default `30`, `0` disables expiry
+- `CODEX_PROXY_REQUEST_LOG_MAX_MB`: request log size cap, default `500`, `0` disables pruning
+- `CODEX_PROXY_APP_LOG_MAX_MB`: app log size cap, default `100`, `0` disables pruning
+- `OPENAI_API_KEY`: fallback API key for passthrough OpenAI endpoints
+- `RUST_LOG`: tracing filter
+
+A `.env` file is loaded automatically when present.
+
+## Client Base URL
+
+Use this base URL for OpenAI-compatible clients:
+
+```text
+http://127.0.0.1:5011/v1
 ```
 
-This ensures Opencode will use your local Codex Proxy Server for OpenAI-compatible requests.
+For clients that do not append `/v1`, use:
 
-## Logging
-- All logs are written to the `logs` folder in the project directory (next to the executable): `Codex Proxy Server Rust/logs/codex-proxy.log` (created automatically).
-- You can find daily log files in this folder for troubleshooting and auditing, regardless of where you run the server from.
-
-## Security
-- No hardcoded secrets, usernames, or tokens in source code
-- All sensitive data is loaded from external files
-- CORS and secure headers are enforced (customize as needed)
-
-## Server Endpoints
-- `POST /v1/chat/completions` — Local Chat Completions compatibility endpoint backed by ChatGPT/Codex auth
-- `POST /chat/completions` — Legacy Chat Completions compatibility endpoint
-- `GET /v1/models` — Local model listing endpoint
-- `/v1/*` — Passthrough proxy to `https://api.openai.com/v1/*` for other OpenAI API endpoints from `Docs/openapi.with-code-samples.yml`; requires an incoming `Authorization` header or `OPENAI_API_KEY`
-- `GET /health` — Health check
-
-## Notes
-- You must build the project once before running it (`cargo build --release`).
-- The server runs locally on port 5011 by default.
-- For production, run behind a TLS proxy (e.g., Nginx, Caddy) for HTTPS support.
+```text
+http://127.0.0.1:5011
+```
 
 ## License
-MIT
 
-## Contributing
-Pull requests and issues are welcome!
+MIT

@@ -401,6 +401,28 @@ pub async fn stream_chat_completions(
     Ok(rx)
 }
 
+pub async fn send_responses_request(config: &Config, payload: Value) -> Result<reqwest::Response> {
+    let client = Client::new();
+    let access_token = get_access_token(config).await?;
+    let account_id = get_account_id(config).await?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    let response = client
+        .post("https://chatgpt.com/backend-api/codex/responses")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("chatgpt-account-id", account_id)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("session_id", session_id)
+        .header("originator", "codex_cli_rs")
+        .json(&payload)
+        .send()
+        .await?;
+
+    Ok(response)
+}
+
 fn message_content_to_text(content: &Value) -> String {
     if let Some(text) = content.as_str() {
         return text.to_string();

@@ -1,7 +1,7 @@
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::{sse::Event, IntoResponse, Json, Response},
     routing::{any, get, post},
     Router,
@@ -31,17 +31,13 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    // Always write logs to the logs folder in the project directory
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
-    let logs_dir = exe_dir.join("logs");
+    let dotenv_path = dotenvy::dotenv().ok();
+    let logs_dir = core::config::default_log_base_dir();
     if let Err(e) = std::fs::create_dir_all(&logs_dir) {
         eprintln!("Failed to create logs directory: {}", e);
     }
     // Initialize tracing with both console and file output
-    let file_appender = tracing_appender::rolling::daily(logs_dir, "codex-proxy.log");
+    let file_appender = tracing_appender::rolling::daily(&logs_dir, "codex-proxy.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::registry()
@@ -68,7 +64,10 @@ async fn main() {
         .init();
 
     info!("=== Starting Codex Proxy Server ==="); // Codex Proxy Server
-    info!("Log file: logs/codex-proxy.log in the project directory (next to the executable). Compatible with Opencode integration.");
+    if let Some(path) = &dotenv_path {
+        info!("Loaded environment from {}", path.display());
+    }
+    info!("App log: {}/codex-proxy.log", logs_dir.display());
     info!("Timestamp: {}", chrono::Utc::now().to_rfc3339());
 
     // Check for --server flag to start directly
@@ -226,15 +225,40 @@ async fn run_server() -> anyhow::Result<()> {
     // Create app state
     let app_state = AppState { config };
 
+    info!(
+        "Request/response logs: {:?} (override with CODEX_PROXY_REQUEST_LOG_DIR)",
+        app_state.config.request_log_dir
+    );
+    info!(
+        "Response store: {:?}, retention {} days (override with CODEX_PROXY_STORE_DIR / CODEX_PROXY_STORE_MAX_AGE_DAYS)",
+        app_state.config.response_store_dir,
+        app_state.config.response_store_max_age_secs / (24 * 60 * 60)
+    );
+    core::log_rotation::spawn(app_state.config.clone());
+
     // Create router
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_completions_handler))
         .route("/chat/completions", post(chat_completions_handler)) // Keep legacy root for compatibility
+        .route("/responses", post(responses_handler))
+        .route(
+            "/responses/:response_id",
+            get(get_response_handler).delete(delete_response_handler),
+        )
+        .route("/v1/responses", post(responses_handler))
+        .route(
+            "/v1/responses/:response_id",
+            get(get_response_handler).delete(delete_response_handler),
+        )
         .route("/v1/models", get(models_handler))
         .route("/v1/*path", any(openai_passthrough_handler))
         .route("/health", get(health_handler))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.config.clone(),
+            core::request_logger::log_request_response,
+        ))
         .with_state(app_state);
 
     let ipv4_addr = SocketAddr::from(([127, 0, 0, 1], 5011));
@@ -738,6 +762,290 @@ async fn models_handler(State(_state): State<AppState>) -> Json<ModelList> {
         object: "list".to_string(),
         data: models,
     })
+}
+
+async fn responses_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Response, StatusCode> {
+    info!("🚀 RESPONSES REQUEST RECEIVED!");
+    debug!("Responses request: {:?}", payload);
+
+    let original_payload = payload.clone();
+    let (mut payload, should_store) =
+        match core::response_store::prepare_responses_payload(&state.config, &payload) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                warn!("Failed to prepare Responses payload: {}", e);
+                return Ok((
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": e.to_string(),
+                            "type": "invalid_request_error",
+                            "code": "previous_response_not_found"
+                        }
+                    })),
+                )
+                    .into_response());
+            }
+        };
+
+    if payload.get("model").is_none() {
+        payload["model"] = serde_json::json!(state.config.model);
+    }
+    if payload.get("instructions").is_none() {
+        let mut instructions = core::client_common::BASE_INSTRUCTIONS.to_string();
+        if let Some(user_instructions) = &state.config.user_instructions {
+            instructions.push_str("\n\n<user_instructions>\n\n");
+            instructions.push_str(user_instructions);
+            instructions.push_str("\n\n</user_instructions>");
+        }
+        payload["instructions"] = serde_json::json!(instructions);
+    }
+    if payload
+        .get("input")
+        .and_then(|input| input.as_array())
+        .is_none()
+    {
+        let input = match payload.get("input").cloned() {
+            Some(serde_json::Value::String(text)) => vec![serde_json::json!({
+                "role": "user",
+                "content": text,
+            })],
+            Some(serde_json::Value::Null) | None => Vec::new(),
+            Some(other) => vec![other],
+        };
+        payload["input"] = serde_json::Value::Array(input);
+    }
+
+    let stream_requested = payload
+        .get("stream")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    payload["stream"] = serde_json::json!(true);
+
+    match chat_completions::send_responses_request(&state.config, payload).await {
+        Ok(response) => {
+            let status = StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+            if stream_requested {
+                let config = state.config.clone();
+                let mut byte_stream = response.bytes_stream();
+                let stream = async_stream::stream! {
+                    let mut line_buf: Vec<u8> = Vec::new();
+                    let mut items: Vec<(u64, serde_json::Value)> = Vec::new();
+                    let mut accumulated: Vec<u8> = Vec::new();
+
+                    while let Some(chunk) = futures_util::StreamExt::next(&mut byte_stream).await {
+                        let bytes = match chunk {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                yield Err(std::io::Error::other(e.to_string()));
+                                return;
+                            }
+                        };
+                        if should_store && status.is_success() {
+                            accumulated.extend_from_slice(&bytes);
+                        }
+                        line_buf.extend_from_slice(&bytes);
+
+                        while let Some(nl) = line_buf.iter().position(|&b| b == b'\n') {
+                            let line: Vec<u8> = line_buf.drain(..=nl).collect();
+                            yield Ok::<Vec<u8>, std::io::Error>(patch_responses_sse_line(line, &mut items));
+                        }
+                    }
+
+                    if !line_buf.is_empty() {
+                        let line = std::mem::take(&mut line_buf);
+                        yield Ok::<Vec<u8>, std::io::Error>(patch_responses_sse_line(line, &mut items));
+                    }
+
+                    if should_store && status.is_success() {
+                        if let Some(response_json) = core::response_store::response_from_sse_bytes(&accumulated) {
+                            if let Err(e) = core::response_store::store_response(&config, original_payload, response_json) {
+                                error!("Failed to store streamed response locally: {}", e);
+                            }
+                        } else {
+                            warn!("store=true requested but streamed response had no completed response object");
+                        }
+                    }
+                };
+
+                let mut out = Response::new(Body::from_stream(stream));
+                *out.status_mut() = status;
+                out.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                Ok(out)
+            } else {
+                let body = response
+                    .bytes()
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if !status.is_success() {
+                    let mut out = Response::new(Body::from(body));
+                    *out.status_mut() = status;
+                    out.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    return Ok(out);
+                }
+
+                let Some(response_json) = core::response_store::response_from_sse_bytes(&body)
+                else {
+                    return Ok((
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": "Upstream stream ended without response.completed",
+                                "type": "server_error",
+                                "code": "missing_response_completed"
+                            }
+                        })),
+                    )
+                        .into_response());
+                };
+
+                if should_store && status.is_success() {
+                    if let Err(e) = core::response_store::store_response(
+                        &state.config,
+                        original_payload,
+                        response_json.clone(),
+                    ) {
+                        error!("Failed to store response locally: {}", e);
+                    }
+                }
+
+                let body = serde_json::to_vec(&response_json)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                let mut out = Response::new(Body::from(body));
+                *out.status_mut() = status;
+                out.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                Ok(out)
+            }
+        }
+        Err(e) => {
+            error!("❌ Responses error: {}", e);
+            Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!("Failed to proxy Responses request: {}", e),
+                        "type": "server_error",
+                        "code": "internal_error"
+                    }
+                })),
+            )
+                .into_response())
+        }
+    }
+}
+
+fn patch_responses_sse_line(line: Vec<u8>, items: &mut Vec<(u64, serde_json::Value)>) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(&line) else {
+        return line;
+    };
+    let Some(rest) = text.strip_prefix("data: ") else {
+        return line;
+    };
+    let data = rest.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return line;
+    }
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+        return line;
+    };
+
+    if let Some(entry) = core::response_store::output_item_done_entry(&event) {
+        items.push(entry);
+        return line;
+    }
+
+    if event.get("type").and_then(|t| t.as_str()) == Some("response.completed") {
+        let mut event = event;
+        if let Some(resp) = event.get_mut("response") {
+            core::response_store::fill_output_from_items(resp, items);
+        }
+        if let Ok(json) = serde_json::to_string(&event) {
+            return format!("data: {}\n", json).into_bytes();
+        }
+    }
+
+    line
+}
+
+async fn get_response_handler(
+    State(state): State<AppState>,
+    Path(response_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    match core::response_store::load_response(&state.config, &response_id) {
+        Ok(Some(response)) => Ok(Json(response).into_response()),
+        Ok(None) => Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!("Stored response not found: {}", response_id),
+                    "type": "invalid_request_error",
+                    "code": "response_not_found"
+                }
+            })),
+        )
+            .into_response()),
+        Err(e) => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "message": e.to_string(),
+                    "type": "invalid_request_error",
+                    "code": "invalid_response_id"
+                }
+            })),
+        )
+            .into_response()),
+    }
+}
+
+async fn delete_response_handler(
+    State(state): State<AppState>,
+    Path(response_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    match core::response_store::delete_response(&state.config, &response_id) {
+        Ok(true) => Ok(Json(serde_json::json!({
+            "id": response_id,
+            "object": "response.deleted",
+            "deleted": true,
+        }))
+        .into_response()),
+        Ok(false) => Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!("Stored response not found: {}", response_id),
+                    "type": "invalid_request_error",
+                    "code": "response_not_found"
+                }
+            })),
+        )
+            .into_response()),
+        Err(e) => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "message": e.to_string(),
+                    "type": "invalid_request_error",
+                    "code": "invalid_response_id"
+                }
+            })),
+        )
+            .into_response()),
+    }
 }
 
 async fn chat_completions_handler(
