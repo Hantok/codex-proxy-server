@@ -105,8 +105,10 @@ This ensures Opencode will use your local Codex Proxy Server for OpenAI-compatib
 - CORS and secure headers are enforced (customize as needed)
 
 ## Server Endpoints
-- `POST /chat/completions` — Chat completions API
-- `GET /v1/models` — List available models
+- `POST /v1/chat/completions` — Local Chat Completions compatibility endpoint backed by ChatGPT/Codex auth
+- `POST /chat/completions` — Legacy Chat Completions compatibility endpoint
+- `GET /v1/models` — Local model listing endpoint
+- `/v1/*` — Passthrough proxy to `https://api.openai.com/v1/*` for other OpenAI API endpoints from `Docs/openapi.with-code-samples.yml`; requires an incoming `Authorization` header or `OPENAI_API_KEY`
 - `GET /health` — Health check
 
 ## Notes

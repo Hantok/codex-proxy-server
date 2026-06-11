@@ -38,15 +38,6 @@ pub struct IdTokenInfo {
     pub(crate) chatgpt_plan_type: Option<PlanType>,
 }
 
-impl IdTokenInfo {
-    pub fn get_chatgpt_plan_type(&self) -> Option<String> {
-        self.chatgpt_plan_type.as_ref().map(|t| match t {
-            PlanType::Known(plan) => format!("{plan:?}"),
-            PlanType::Unknown(s) => s.clone(),
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum PlanType {

@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use dirs::home_dir;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -12,10 +12,10 @@ pub struct Config {
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let codex_home = find_codex_home();
-        
+
         // Load user instructions from AGENTS.md
         let user_instructions = Self::load_instructions(Some(&codex_home));
-        
+
         // Check if auth.json exists in ./local_auth directory (fallback)
         let local_auth_dir = std::env::current_dir()?.join("local_auth");
         let local_auth_file = local_auth_dir.join("auth.json");
@@ -37,7 +37,7 @@ impl Config {
                 user_instructions,
             });
         }
-        
+
         Ok(Config {
             codex_home,
             chatgpt_base_url: "https://chatgpt.com/backend-api/codex".to_string(),
@@ -72,14 +72,14 @@ fn find_codex_home() -> PathBuf {
         if codex_home.exists() {
             return codex_home;
         }
-        
+
         // Then check for .opencode directory (Opencode integration default)
         let opencode_home = home.join(".opencode");
         if opencode_home.exists() {
             return opencode_home;
         }
     }
-    
+
     // Fallback to current directory
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }

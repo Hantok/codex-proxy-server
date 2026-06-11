@@ -4,17 +4,16 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 use std::env;
+#[cfg(test)]
+use std::fs::remove_file;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::fs::remove_file;
 use std::io::Read;
 use std::io::Write;
-use std::io::{self};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Child;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,8 +21,8 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::process::Command;
 
-pub use crate::login::token_data::TokenData;
 use crate::login::token_data::parse_id_token;
+pub use crate::login::token_data::TokenData;
 
 const SOURCE_FOR_PYTHON_SERVER: &str = include_str!("./login_with_chatgpt.py");
 
@@ -122,11 +121,6 @@ impl CodexAuth {
         }
     }
 
-    pub fn get_account_id(&self) -> Option<String> {
-        self.get_current_token_data()
-            .and_then(|t| t.account_id.clone())
-    }
-
     pub fn get_plan_type(&self) -> Option<String> {
         self.get_current_token_data()
             .and_then(|t| t.id_token.chatgpt_plan_type.as_ref().map(|p| p.as_string()))
@@ -139,28 +133,6 @@ impl CodexAuth {
 
     fn get_current_token_data(&self) -> Option<TokenData> {
         self.get_current_auth_json().and_then(|t| t.tokens.clone())
-    }
-
-    /// Consider this private to integration tests.
-    pub fn create_dummy_chatgpt_auth_for_testing() -> Self {
-        let auth_dot_json = AuthDotJson {
-            openai_api_key: None,
-            tokens: Some(TokenData {
-                id_token: Default::default(),
-                access_token: "Access Token".to_string(),
-                refresh_token: "test".to_string(),
-                account_id: Some("account_id".to_string()),
-            }),
-            last_refresh: Some(Utc::now()),
-        };
-
-        let auth_dot_json = Arc::new(Mutex::new(Some(auth_dot_json)));
-        Self {
-            api_key: None,
-            mode: AuthMode::ChatGPT,
-            auth_file: PathBuf::new(),
-            auth_dot_json,
-        }
     }
 }
 
@@ -242,6 +214,7 @@ pub fn get_auth_file(codex_home: &Path) -> PathBuf {
 
 /// Delete the auth.json file inside `codex_home` if it exists. Returns `Ok(true)`
 /// if a file was removed, `Ok(false)` if no auth file was present.
+#[cfg(test)]
 pub fn logout(codex_home: &Path) -> std::io::Result<bool> {
     let auth_file = get_auth_file(codex_home);
     match remove_file(&auth_file) {
@@ -249,89 +222,6 @@ pub fn logout(codex_home: &Path) -> std::io::Result<bool> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(err),
     }
-}
-
-/// Represents a running login subprocess. The child can be killed by holding
-/// the mutex and calling `kill()`.
-#[derive(Debug, Clone)]
-pub struct SpawnedLogin {
-    pub child: Arc<Mutex<Child>>,
-    pub stdout: Arc<Mutex<Vec<u8>>>,
-    pub stderr: Arc<Mutex<Vec<u8>>>,
-}
-
-impl SpawnedLogin {
-    /// Returns the login URL, if one has been emitted by the login subprocess.
-    ///
-    /// The Python helper prints the URL to stderr; we capture it and extract
-    /// the last whitespace-separated token that starts with "http".
-    pub fn get_login_url(&self) -> Option<String> {
-        self.stderr
-            .lock()
-            .ok()
-            .and_then(|buffer| String::from_utf8(buffer.clone()).ok())
-            .and_then(|output| {
-                output
-                    .split_whitespace()
-                    .filter(|part| part.starts_with("http"))
-                    .next_back()
-                    .map(|s| s.to_string())
-            })
-    }
-}
-
-// Helpers for streaming child output into shared buffers
-struct AppendWriter {
-    buf: Arc<Mutex<Vec<u8>>>,
-}
-
-impl Write for AppendWriter {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        if let Ok(mut b) = self.buf.lock() {
-            b.extend_from_slice(data);
-        }
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn spawn_pipe_reader<R: Read + Send + 'static>(mut reader: R, buf: Arc<Mutex<Vec<u8>>>) {
-    std::thread::spawn(move || {
-        let _ = io::copy(&mut reader, &mut AppendWriter { buf });
-    });
-}
-
-/// Spawn the ChatGPT login Python server as a child process and return a handle to its process.
-pub fn spawn_login_with_chatgpt(codex_home: &Path) -> std::io::Result<SpawnedLogin> {
-    let script_path = write_login_script_to_disk()?;
-    let mut cmd = std::process::Command::new("python3");
-    cmd.arg(&script_path)
-        .env("CODEX_HOME", codex_home)
-        .env("CODEX_CLIENT_ID", CLIENT_ID)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd.spawn()?;
-
-    let stdout_buf = Arc::new(Mutex::new(Vec::new()));
-    let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-
-    if let Some(out) = child.stdout.take() {
-        spawn_pipe_reader(out, stdout_buf.clone());
-    }
-    if let Some(err) = child.stderr.take() {
-        spawn_pipe_reader(err, stderr_buf.clone());
-    }
-
-    Ok(SpawnedLogin {
-        child: Arc::new(Mutex::new(child)),
-        stdout: stdout_buf,
-        stderr: stderr_buf,
-    })
 }
 
 /// Run `python3 -c {{SOURCE_FOR_PYTHON_SERVER}}` with the CODEX_HOME
@@ -384,6 +274,7 @@ fn write_login_script_to_disk() -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(test)]
 pub fn login_with_api_key(codex_home: &Path, api_key: &str) -> std::io::Result<()> {
     let auth_dot_json = AuthDotJson {
         openai_api_key: Some(api_key.to_string()),

@@ -11,51 +11,13 @@ pub struct ChatRequest {
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
-    pub tools: Vec<Tool>,
+    pub tools: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tool {
-    #[serde(rename = "type")]
-    pub tool_type: String,
-    pub function: Function,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Function {
-    pub name: String,
-    pub description: Option<String>,
-    pub parameters: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatResponse {
-    pub id: String,
-    pub object: String,
-    pub created: i64,
-    pub model: String,
-    pub choices: Vec<Choice>,
-    pub usage: Usage,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Choice {
-    pub index: u32,
-    pub message: Message,
-    pub finish_reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
+    pub content: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,13 +48,17 @@ pub struct ResponseEvent {
 pub struct ResponseChoice {
     pub index: u32,
     pub delta: ResponseDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(rename = "tool_calls")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<serde_json::Value>,
 }
