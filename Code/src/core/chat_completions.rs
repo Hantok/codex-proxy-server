@@ -94,6 +94,9 @@ pub async fn stream_chat_completions(
                 if name.is_empty() || name == "null" {
                     return None;
                 }
+                if is_sensitive_client_tool(name) {
+                    return None;
+                }
                 let parameters = function
                     .get("parameters")
                     .cloned()
@@ -445,6 +448,10 @@ fn message_content_to_text(content: &Value) -> String {
     }
 
     content.to_string()
+}
+
+fn is_sensitive_client_tool(name: &str) -> bool {
+    matches!(name, "location-get-current-location")
 }
 
 fn normalize_tool_parameters(mut parameters: Value) -> Value {
