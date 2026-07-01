@@ -515,6 +515,9 @@ fn parse_sse_event(event: &Value) -> Option<ResponseEvent> {
         Some("response.function_call_arguments.delta")
             | Some("response.function_call_arguments.done")
             | Some("response.done")
+            | Some("response.completed")
+            | Some("response.output_text.done")
+            | Some("response.content_part.done")
     ) {
         return None;
     }
