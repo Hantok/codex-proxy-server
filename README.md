@@ -29,6 +29,41 @@ cargo run --release -- --server
 
 With no arguments, the binary opens an interactive menu for starting the server, login, token refresh, listing ports, and closing running servers.
 
+## Run on Startup (macOS)
+
+To run the proxy server automatically in the background on startup, create a `launchd` plist file at `~/Library/LaunchAgents/com.user.codex-proxy.plist` with the following content (be sure to replace `/path/to/Codex-Proxy-Server` with your actual absolute path):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.codex-proxy</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>/path/to/Codex-Proxy-Server/Code</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/Codex-Proxy-Server/Code/target/release/codex-proxy-server</string>
+        <string>--server</string>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/tmp/codex-proxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/codex-proxy.error.log</string>
+</dict>
+</plist>
+```
+
+Load the service:
+```sh
+launchctl load ~/Library/LaunchAgents/com.user.codex-proxy.plist
+```
+
 ## Authentication
 
 The server searches for ChatGPT/Codex auth in this order:
