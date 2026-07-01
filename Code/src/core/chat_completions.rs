@@ -514,6 +514,7 @@ fn parse_sse_event(event: &Value) -> Option<ResponseEvent> {
         event_type,
         Some("response.function_call_arguments.delta")
             | Some("response.function_call_arguments.done")
+            | Some("response.done")
     ) {
         return None;
     }
@@ -580,6 +581,10 @@ fn parse_sse_event(event: &Value) -> Option<ResponseEvent> {
                 });
             }
         }
+        
+        // Ignore non-function_call output_item.done events (e.g. text messages)
+        // to prevent duplicating the full text that was already streamed in deltas.
+        return None;
     }
 
     // ChatGPT's Responses API has a different structure than OpenAI's
